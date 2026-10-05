@@ -1,0 +1,44 @@
+rules_version = '2';
+
+// =============================================================================
+// Security Rules Cloud Storage
+// =============================================================================
+//
+// Dipakai untuk berkas pendukung jadwal laboratorium (mis. PDF/Excel jadwal
+// praktikum yang diunggah Kepala Laboratorium — kebutuhan fungsional
+// "input/upload jadwal lab").
+//
+// Berkas unggahan hanya boleh dibaca pengguna terverifikasi dan hanya boleh
+// ditulis oleh Kepala Laboratorium. Peran diperiksa lewat dokumen
+// `users/{uid}.jabatan` di Firestore (cross-service rules).
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn()
+        && firestore.get(
+             /databases/(default)/documents/users/$(request.auth.uid)
+           ).data.jabatan == 'Kepala Lab';
+    }
+
+    // Berkas jadwal laboratorium.
+    match /jadwal/{fileName} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin()
+                   && request.resource.size < 10 * 1024 * 1024
+                   && request.resource.contentType.matches(
+                        'application/pdf|application/vnd.*|image/.*|text/csv'
+                      );
+    }
+
+    // Semua jalur lain ditolak.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

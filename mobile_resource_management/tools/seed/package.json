@@ -1,0 +1,16 @@
+{
+  "name": "mrm-seed",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Skrip seed data awal untuk Mobile Resource Management STMIK Triguna Dharma",
+  "scripts": {
+    "seed": "node seed.mjs",
+    "seed:reset": "node seed.mjs --reset",
+    "promote": "node promote-admin.mjs",
+    "build:indexes": "node -e \"console.log('Index dikelola lewat firebase deploy --only firestore:indexes')\""
+  },
+  "dependencies": {
+    "firebase-admin": "^13.4.0"
+  }
+}

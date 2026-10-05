@@ -1,0 +1,16 @@
+# Berkas hasil kompilasi TypeScript
+lib/
+
+# Dependensi
+node_modules/
+
+# Konfigurasi lokal (jangan di-commit)
+.env
+.env.*
+*.local
+
+# Log
+npm-debug.log*
+yarn-error.log*
+firebase-debug.log*
+firebase-debug.*.log*

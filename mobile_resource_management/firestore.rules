@@ -1,0 +1,254 @@
+rules_version = '2';
+
+// =============================================================================
+// Security Rules Cloud Firestore
+// Aplikasi: Mobile Resource Management STMIK Triguna Dharma
+// =============================================================================
+//
+// Prinsip yang dipakai:
+//   1. Default menolak. Setiap koleksi harus punya aturan eksplisit.
+//   2. Peran diambil dari dokumen `users/{uid}.jabatan` — bukan dari klien.
+//      Klien tidak pernah boleh mengirim `jabatan` saat registrasi selain
+//      'Mahasiswa' atau 'Dosen' (lihat aturan `users` di bawah).
+//   3. Pengajuan (`bookings`) hanya boleh dibuat oleh pemiliknya sendiri dan
+//      selalu berstatus 'Menunggu'. Klien tidak boleh menentukan status awal
+//      maupun memverifikasi pengajuannya sendiri.
+//   4. Kepala Laboratorium hanya boleh mengubah field verifikasi, bukan isi
+//      pengajuan.
+//
+// Catatan: fungsi `isAdmin()` melakukan `get()` ke dokumen profil. Firestore
+// men-cache hasil `get()` dalam satu evaluasi request, sehingga biayanya
+// terhitung satu pembacaan dokumen per request.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // -------------------------------------------------------------------------
+    // Fungsi bantu
+    // -------------------------------------------------------------------------
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function currentUid() {
+      return request.auth.uid;
+    }
+
+    function profilePath() {
+      return /databases/$(database)/documents/users/$(currentUid());
+    }
+
+    function profileExists() {
+      return isSignedIn() && exists(profilePath());
+    }
+
+    function profile() {
+      return get(profilePath()).data;
+    }
+
+    function isAdmin() {
+      return profileExists() && profile().jabatan == 'Kepala Lab';
+    }
+
+    function isAccountActive() {
+      return profileExists() && profile().is_active == true;
+    }
+
+    // Field yang dikelola sistem dan tidak boleh diubah dari sisi klien.
+    function isImmutableField(field) {
+      return field in ['uid', 'jabatan', 'is_active', 'created_at'];
+    }
+
+    // -------------------------------------------------------------------------
+    // users — profil civitas akademika
+    // -------------------------------------------------------------------------
+
+    match /users/{userId} {
+
+      // Pemilik boleh membaca profilnya sendiri; Kepala Lab boleh membaca semua
+      // (dibutuhkan untuk menampilkan identitas pemohon & mengirim notifikasi).
+      allow read: if isSignedIn() && (currentUid() == userId || isAdmin());
+
+      // Registrasi mandiri: dokumen id harus sama dengan UID, dan jabatan
+      // dibatasi pada peran yang boleh mendaftar sendiri.
+      allow create: if isSignedIn()
+                    && currentUid() == userId
+                    && request.resource.data.uid == userId
+                    && request.resource.data.jabatan in ['Mahasiswa', 'Dosen']
+                    && request.resource.data.nama is string
+                    && request.resource.data.nama.size() >= 3
+                    && request.resource.data.nomor_identitas is string
+                    && request.resource.data.nomor_identitas.size() >= 6
+                    && request.resource.data.is_active == true;
+
+      // Pemilik boleh memperbarui datanya, tetapi TIDAK boleh mengubah
+      // jabatan / status aktif (mencegah eskalasi hak akses).
+      // Kepala Lab boleh memperbarui apa pun (mis. mempromosikan Kepala Lab).
+      allow update: if isSignedIn()
+                    && (
+                      (
+                        currentUid() == userId
+                        && !request.resource.data.diff(resource.data)
+                              .affectedKeys()
+                              .hasAny(['uid', 'jabatan', 'is_active'])
+                      )
+                      || isAdmin()
+                    );
+
+    // agar riwayat pengajuan tetap utuh.
+      allow delete: if false;
+    }
+
+    // -------------------------------------------------------------------------
+    // labs — daftar ruangan laboratorium
+    // -------------------------------------------------------------------------
+
+    match /labs/{labId} {
+      // Seluruh pengguna terverifikasi perlu membaca daftar lab untuk mengisi
+      // kalender ketersediaan dan memilih laboratorium.
+      allow read: if isSignedIn();
+
+      allow create, update, delete: if isAdmin()
+                                    && request.resource.data.nama_lab is string
+                                    && request.resource.data.kapasitas is int
+                                    && request.resource.data.kapasitas > 0;
+    }
+
+    // -------------------------------------------------------------------------
+    // lab_schedules — jadwal acuan yang diinput Kepala Laboratorium
+    // -------------------------------------------------------------------------
+
+    match /lab_schedules/{scheduleId} {
+      allow read: if isSignedIn();
+
+      allow create, update: if isAdmin()
+                            && request.resource.data.id_lab is string
+                            && request.resource.data.mata_kuliah is string
+                            && request.resource.data.mata_kuliah.size() >= 3
+                            && request.resource.data.tanggal is string
+                            && request.resource.data.tanggal.size() == 10
+                            && request.resource.data.mulai_menit is int
+                            && request.resource.data.selesai_menit is int
+                            && request.resource.data.selesai_menit
+                               > request.resource.data.mulai_menit;
+
+      allow delete: if isAdmin();
+    }
+
+    // -------------------------------------------------------------------------
+    // bookings — pengajuan kelas pengganti
+    // -------------------------------------------------------------------------
+
+    match /bookings/{bookingId} {
+
+      // Dibaca semua pengguna terverifikasi: kalender ketersediaan menampilkan
+      // slot terpakai secara real-time (setara papan jadwal di depan lab).
+      allow read: if isSignedIn();
+
+      // Pengajuan baru: harus milik sendiri, status awal wajib 'Menunggu',
+      // dan rentang waktu harus masuk akal.
+      allow create: if isSignedIn()
+                    && isAccountActive()
+                    && request.resource.data.id_user == currentUid()
+                    && request.resource.data.status == 'Menunggu'
+                    && request.resource.data.id_lab is string
+                    && request.resource.data.mata_kuliah is string
+                    && request.resource.data.mata_kuliah.size() >= 3
+                    && request.resource.data.mata_kuliah.size() <= 100
+                    && request.resource.data.tanggal is string
+                    && request.resource.data.tanggal.size() == 10
+                    && request.resource.data.jam_mulai is string
+                    && request.resource.data.jam_selesai is string
+                    && request.resource.data.mulai_menit is int
+                    && request.resource.data.selesai_menit is int
+                    && request.resource.data.selesai_menit
+                       > request.resource.data.mulai_menit
+                    // Maksimal 4 jam per sesi, sesuai AppConfig.maxSessionMinutes
+                    && request.resource.data.selesai_menit
+                       - request.resource.data.mulai_menit <= 240
+                    // Dalam jam operasional laboratorium (08:00 - 21:00)
+                    && request.resource.data.mulai_menit >= 480
+                    && request.resource.data.selesai_menit <= 1260
+                    // Field verifikasi harus belum terisi. Memakai `data.get()`
+                    // dengan nilai bawaan, bukan akses langsung: pada Firestore
+                    // Rules, membaca field yang TIDAK ADA menimbulkan evaluation
+                    // error, dan setiap error diperlakukan sebagai penolakan.
+                    // Klien yang tidak mengirim field ini akan ditolak tanpa
+                    // penjelasan yang jelas.
+                    && request.resource.data.get('diverifikasi_oleh', null) == null
+                    && request.resource.data.get('alasan_penolakan', null) == null;
+
+      // Verifikasi: hanya Kepala Lab, dan hanya boleh menyentuh field
+      // verifikasi — isi pengajuan (lab, waktu, mata kuliah) tidak boleh diubah.
+      allow update: if isAdmin()
+                    && request.resource.data.diff(resource.data)
+                         .affectedKeys()
+                         .hasOnly([
+                           'status',
+                           'diverifikasi_oleh',
+                           'diverifikasi_pada',
+                           'alasan_penolakan',
+                           'updated_at',
+                         ])
+                    && request.resource.data.status in ['Disetujui', 'Ditolak']
+                    && resource.data.status == 'Menunggu'
+                    && request.resource.data.diverifikasi_oleh == currentUid()
+                    // Penolakan wajib disertai alasan.
+                    && (
+                      request.resource.data.status == 'Disetujui'
+                      || request.resource.data.alasan_penolakan is string
+                    );
+
+      // Pemohon boleh membatalkan pengajuannya selama masih 'Menunggu'.
+      allow delete: if isSignedIn()
+                    && resource.data.id_user == currentUid()
+                    && resource.data.status == 'Menunggu';
+    }
+
+    // -------------------------------------------------------------------------
+    // slot_locks — peta keterisian slot per laboratorium per hari
+    // -------------------------------------------------------------------------
+    //
+    // Satu dokumen memuat seluruh slot (kelipatan 30 menit) untuk satu
+    // laboratorium pada satu tanggal. Dokumen ini adalah **titik serialisasi**
+    // yang membuat pemeriksaan jadwal bentrok bebas race condition tanpa Cloud
+    // Functions: transaksi klien membaca dokumen ini lalu menulisnya kembali,
+    // sehingga Firestore dapat mendeteksi konflik antar transaksi.
+    //
+    // Keterisian hanya berubah ketika pengajuan **disetujui** atau jadwal acuan
+    // ditambah/diubah/dihapus — semuanya tindakan Kepala Laboratorium.
+
+    match /slot_locks/{lockId} {
+
+      // Wajib dapat dibaca semua pengguna terverifikasi: transaksi pengajuan
+      // membaca dokumen ini untuk memeriksa ketersediaan sebelum menulis.
+      allow read: if isSignedIn();
+
+      allow create, update: if isAdmin()
+                            && request.resource.data.id_lab is string
+                            && request.resource.data.tanggal is string
+                            && request.resource.data.tanggal.size() == 10
+                            && request.resource.data.slots is map;
+
+      allow delete: if isAdmin();
+    }
+
+    // -------------------------------------------------------------------------
+    // app_meta — metadata aplikasi (semester aktif, dsb.)
+    // -------------------------------------------------------------------------
+
+    match /app_meta/{docId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // -------------------------------------------------------------------------
+    // Koleksi lain: tolak semua.
+    // -------------------------------------------------------------------------
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
